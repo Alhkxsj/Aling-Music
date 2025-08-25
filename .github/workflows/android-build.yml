@@ -1,89 +1,91 @@
-name: Beta Debug
+name: MusicFree Debug 构建
 
 on:
   push:
-    branches: [dev]
-    paths: ['package.json']
-  workflow_dispatch:
+    branches: [ main ]
+    paths: [ 'package.json' ]
+  workflow_dispatch:  # 支持手动触发[citation:3][citation:9]
     inputs:
       force_build:
-        description: '强制构建 Beta 版本'
+        description: '强制构建'
         required: false
         default: 'false'
         type: boolean
 
 jobs:
   check-version:
-    if: github.actor == 'maotoumao' || github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.version_check.outputs.should_build }}
       version: ${{ steps.version_check.outputs.version }}
     steps:
-      - name: Checkout
+      - name: Checkout 代码
         uses: actions/checkout@v4
 
-      - name: Check version format
+      - name: 检查版本和构建条件
         id: version_check
         run: |
-          # 添加JSON解析容错
-          if [ ! -f package.json ]; then
-            echo "❌ package.json not found"
+          if [ ! -f "package.json" ]; then
+            echo "❌ package.json 不存在"
             echo "should_build=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          VERSION=$(node -p "try { require('./package.json').version } catch (e) { '' }")
+          VERSION=$(node -e "console.log(require('./package.json').version || '')")
           if [ -z "$VERSION" ]; then
-            echo "❌ Failed to parse package.json"
+            echo "❌ 无法从 package.json 中获取版本号"
             echo "should_build=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          echo "Current version: $VERSION"
-          if [[ $VERSION =~ -beta\.[0-9]{1,2}$ ]]; then
-            echo "✅ Version matches beta format: $VERSION"
+          echo "当前版本: $VERSION"
+          
+          # 主分支推送且 package.json 有变化就构建
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "✅ 主分支推送，构建版本: $VERSION"
             echo "should_build=true" >> $GITHUB_OUTPUT
             echo "version=$VERSION" >> $GITHUB_OUTPUT
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_build }}" == "true" ]]; then
-            echo "🔧 Force build triggered by workflow_dispatch"
+            echo "🔧 手动触发构建"
             echo "should_build=true" >> $GITHUB_OUTPUT
             echo "version=$VERSION" >> $GITHUB_OUTPUT
           else
-            echo "❌ Version does not match beta format or not forced: $VERSION"
+            echo "❌ 非主分支且非手动触发构建"
             echo "should_build=false" >> $GITHUB_OUTPUT
           fi
 
-  build-beta:
+  build-debug:
     needs: check-version
-    if: needs.check-version.outputs.should_build == 'true'
+    if: needs.check-version.outputs.should_build == 'true' # 根据检查结果决定是否运行此job[citation:8]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    
+    env:
+      NODE_OPTIONS: "--max_old_space_size=4096"
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
-      - name: Checkout
+      - name: Checkout 代码
         uses: actions/checkout@v4
 
-      - name: Free disk space
+      - name: 清理磁盘空间
         run: |
           sudo apt-get clean
           sudo rm -rf /usr/local/lib/android/sdk/ndk/*
           df -h
 
-      - name: Set up Java
+      - name: 设置 JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Set up Node.js
+      - name: 设置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
 
-      - name: Cache dependencies
+      - name: 缓存依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -96,21 +98,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rn-
 
-      - name: Install npm dependencies
+      - name: 安装 npm 依赖
         run: npm ci --prefer-offline
 
-      - name: Make gradlew executable
+      - name: 授予 gradlew 执行权限
         run: chmod +x android/gradlew
 
-      - name: Diagnostic info
+      - name: 诊断信息
         run: |
-          echo "Node version: $(node --version)"
-          echo "NPM version: $(npm --version)"
-          echo "Java version: $(java -version 2>&1)"
-          echo "Android SDK:"
-          ls $ANDROID_HOME || true
+          echo "Node 版本: $(node --version)"
+          echo "NPM 版本: $(npm --version)"
+          echo "Java 版本: $(java -version 2>&1)"
+          echo "Android SDK 组件:"
+          sdkmanager --list || true
 
-      - name: Build Debug APK
+      - name: 构建 Debug APK
         run: |
           cd android
           ./gradlew clean
@@ -120,24 +122,24 @@ jobs:
             --configure-on-demand \
             --no-daemon \
             --console=verbose
-        timeout-minutes: 20
+        timeout-minutes: 25
 
-      - name: List generated APKs
+      - name: 列出生成的 APK
         run: |
-          echo "📱 Generated APK files:"
+          echo "📱 生成的 APK 文件:"
           find android/app/build/outputs -name "*.apk" -exec ls -la {} \; || true
 
-      - name: Upload Debug APKs
+      - name: 上传 Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: beta-debug-apks-${{ needs.check-version.outputs.version }}
+          name: debug-apks-${{ needs.check-version.outputs.version }}
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
-      - name: Build Summary
+      - name: 构建总结
         run: |
-          echo "🎉 Beta debug build completed successfully!"
-          echo "📦 Version: ${{ needs.check-version.outputs.version }}"
-          echo "🚀 Triggered by: ${{ github.event_name }}"
-          echo "👤 Actor: ${{ github.actor }}"
-          echo "📊 Artifact: beta-debug-apks-${{ needs.check-version.outputs.version }}"
+          echo "🎉 Debug 构建成功完成!"
+          echo "📦 版本: ${{ needs.check-version.outputs.version }}"
+          echo "🚀 触发方式: ${{ github.event_name }}"
+          echo "👤 操作者: ${{ github.actor }}"
+          echo "📊 产物: debug-apks-${{ needs.check-version.outputs.version }}"
