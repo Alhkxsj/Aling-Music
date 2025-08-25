@@ -122,25 +122,45 @@ jobs:
           echo "Java 版本: $(java -version 2>&1)"
           echo "Gradle 配置:"
           cat android/gradle/wrapper/gradle-wrapper.properties || true
+          echo "检查 build.gradle 文件:"
+          if [ -f "android/app/build.gradle" ]; then
+            echo "build.gradle 存在，检查第140-150行:"
+            sed -n '140,150p' android/app/build.gradle
+          fi
 
-      - name: 预下载 Gradle
+      - name: 检查并修复 build.gradle 问题
         run: |
           cd android
-          # 尝试预下载 Gradle 发行版
-          ./gradlew --version --no-daemon || echo "Gradle 预下载完成"
+          # 尝试找出空路径问题
+          if grep -n "path.*=.*null" app/build.gradle; then
+            echo "⚠️  发现可能的空路径问题"
+          fi
+          
+          # 检查常见的路径配置问题
+          if grep -n "storeFile.*null" app/build.gradle; then
+            echo "⚠️  发现可能的签名配置问题"
+          fi
 
-      - name: 构建 Debug APK
+      - name: 设置 Android 环境变量
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          # 设置一些可能需要的环境变量
+          echo "ORG_GRADLE_PROJECT_android.useAndroidX=true" >> $GITHUB_ENV
+          echo "ORG_GRADLE_PROJECT_android.enableJetifier=true" >> $GITHUB_ENV
+
+      - name: 尝试构建 Debug APK (带详细日志)
         run: |
           cd android
-          ./gradlew clean
-          # 增加超时时间和重试机制
-          timeout 1800 ./gradlew assembleDebug \
-            --parallel \
-            --build-cache \
-            --configure-on-demand \
+          # 先尝试清理
+          ./gradlew clean --no-daemon --console=verbose
+          
+          # 尝试构建，使用 --info 获取更多信息
+          ./gradlew assembleDebug \
             --no-daemon \
             --console=verbose \
-            --refresh-dependencies
+            --info \
+            --stacktrace
         timeout-minutes: 30
 
       - name: 列出生成的 APK
@@ -149,6 +169,7 @@ jobs:
           find android/app/build/outputs -name "*.apk" -exec ls -la {} \; || true
 
       - name: 上传 Debug APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: debug-apks-${{ needs.check-version.outputs.version }}
@@ -157,8 +178,15 @@ jobs:
 
       - name: 构建总结
         run: |
-          echo "🎉 Debug 构建成功完成!"
-          echo "📦 版本: ${{ needs.check-version.outputs.version }}"
-          echo "🚀 触发方式: ${{ github.event_name }}"
-          echo "👤 操作者: ${{ github.actor }}"
-          echo "📊 产物: debug-apks-${{ needs.check-version.outputs.version }}"
+          if [ $? -eq 0 ]; then
+            echo "🎉 Debug 构建成功完成!"
+            echo "📦 版本: ${{ needs.check-version.outputs.version }}"
+            echo "🚀 触发方式: ${{ github.event_name }}"
+            echo "👤 操作者: ${{ github.actor }}"
+            echo "📊 产物: debug-apks-${{ needs.check-version.outputs.version }}"
+          else
+            echo "❌ 构建失败，请检查上面的错误信息"
+            echo "📦 版本: ${{ needs.check-version.outputs.version }}"
+            echo "🚀 触发方式: ${{ github.event_name }}"
+            echo "👤 操作者: ${{ github.actor }}"
+          fi
