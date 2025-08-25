@@ -39,20 +39,8 @@ jobs:
           fi
           
           echo "当前版本: $VERSION"
-          
-          # 主分支推送且 package.json 有变化就构建
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "✅ 主分支推送，构建版本: $VERSION"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_build }}" == "true" ]]; then
-            echo "🔧 手动触发构建"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-          else
-            echo "❌ 非主分支且非手动触发构建"
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          fi
+          echo "should_build=true" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   build-debug:
     needs: check-version
@@ -62,17 +50,9 @@ jobs:
       NODE_OPTIONS: "--max_old_space_size=4096"
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      # 设置 Gradle 使用国内镜像
-      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
     steps:
       - name: Checkout 代码
         uses: actions/checkout@v4
-
-      - name: 清理磁盘空间
-        run: |
-          sudo apt-get clean
-          sudo rm -rf /usr/local/lib/android/sdk/ndk/*
-          df -h
 
       - name: 设置 JDK 17
         uses: actions/setup-java@v4
@@ -90,11 +70,38 @@ jobs:
       - name: 修改 Gradle 配置使用国内镜像
         run: |
           cd android
-          # 备份原始配置
           cp gradle/wrapper/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.properties.backup
-          # 使用国内镜像替代
           sed -i 's|https\\://services.gradle.org/distributions|https://mirrors.cloud.tencent.com/gradle|' gradle/wrapper/gradle-wrapper.properties
-          echo "✅ 已修改 Gradle 配置使用腾讯云镜像"
+
+      - name: 修复签名配置问题
+        run: |
+          cd android/app
+          # 检查 debug.keystore 是否存在
+          if [ -f "debug.keystore" ]; then
+            echo "✅ debug.keystore 文件存在"
+          else
+            echo "⚠️  debug.keystore 文件不存在，将使用默认调试配置"
+          fi
+          
+          # 修复签名配置 - 简化版本
+          cp build.gradle build.gradle.backup
+          # 确保 release 配置有回退方案
+          sed -i '/release {/,/}/ {
+            /storeFile file(keystoreProperties/ {
+              i\
+            if (keystorePropertiesFile.exists()) {
+              :loop
+              n
+              /}/!b loop
+              i\
+            } else {\
+                storeFile file("debug.keystore")\
+                storePassword "android"\
+                keyAlias "androiddebugkey"\
+                keyPassword "android"\
+            }
+            }
+          }' build.gradle
 
       - name: 缓存依赖
         uses: actions/cache@v4
@@ -104,8 +111,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             android/.gradle
-            android/app/build
-          key: ${{ runner.os }}-rn-${{ hashFiles('package-lock.json', 'android/gradle/wrapper/gradle-wrapper.properties', 'android/build.gradle') }}
+          key: ${{ runner.os }}-rn-${{ hashFiles('package-lock.json', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-rn-
 
@@ -115,53 +121,17 @@ jobs:
       - name: 授予 gradlew 执行权限
         run: chmod +x android/gradlew
 
-      - name: 诊断信息
-        run: |
-          echo "Node 版本: $(node --version)"
-          echo "NPM 版本: $(npm --version)"
-          echo "Java 版本: $(java -version 2>&1)"
-          echo "Gradle 配置:"
-          cat android/gradle/wrapper/gradle-wrapper.properties || true
-          echo "检查 build.gradle 文件:"
-          if [ -f "android/app/build.gradle" ]; then
-            echo "build.gradle 存在，检查第140-150行:"
-            sed -n '140,150p' android/app/build.gradle
-          fi
-
-      - name: 检查并修复 build.gradle 问题
+      - name: 构建 Debug APK
         run: |
           cd android
-          # 尝试找出空路径问题
-          if grep -n "path.*=.*null" app/build.gradle; then
-            echo "⚠️  发现可能的空路径问题"
-          fi
-          
-          # 检查常见的路径配置问题
-          if grep -n "storeFile.*null" app/build.gradle; then
-            echo "⚠️  发现可能的签名配置问题"
-          fi
-
-      - name: 设置 Android 环境变量
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          # 设置一些可能需要的环境变量
-          echo "ORG_GRADLE_PROJECT_android.useAndroidX=true" >> $GITHUB_ENV
-          echo "ORG_GRADLE_PROJECT_android.enableJetifier=true" >> $GITHUB_ENV
-
-      - name: 尝试构建 Debug APK (带详细日志)
-        run: |
-          cd android
-          # 先尝试清理
-          ./gradlew clean --no-daemon --console=verbose
-          
-          # 尝试构建，使用 --info 获取更多信息
+          ./gradlew clean
           ./gradlew assembleDebug \
+            --parallel \
+            --build-cache \
+            --configure-on-demand \
             --no-daemon \
-            --console=verbose \
-            --info \
-            --stacktrace
-        timeout-minutes: 30
+            --console=verbose
+        timeout-minutes: 25
 
       - name: 列出生成的 APK
         run: |
@@ -169,7 +139,6 @@ jobs:
           find android/app/build/outputs -name "*.apk" -exec ls -la {} \; || true
 
       - name: 上传 Debug APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: debug-apks-${{ needs.check-version.outputs.version }}
@@ -178,15 +147,59 @@ jobs:
 
       - name: 构建总结
         run: |
-          if [ $? -eq 0 ]; then
-            echo "🎉 Debug 构建成功完成!"
-            echo "📦 版本: ${{ needs.check-version.outputs.version }}"
-            echo "🚀 触发方式: ${{ github.event_name }}"
-            echo "👤 操作者: ${{ github.actor }}"
-            echo "📊 产物: debug-apks-${{ needs.check-version.outputs.version }}"
-          else
-            echo "❌ 构建失败，请检查上面的错误信息"
-            echo "📦 版本: ${{ needs.check-version.outputs.version }}"
-            echo "🚀 触发方式: ${{ github.event_name }}"
-            echo "👤 操作者: ${{ github.actor }}"
+          echo "🎉 Debug 构建成功完成!"
+          echo "📦 版本: ${{ needs.check-version.outputs.version }}"
+          echo "🚀 触发方式: ${{ github.event_name }}"
+          echo "👤 操作者: ${{ github.actor }}"
+
+  build-release:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--max_old_space_size=4096"
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: 设置 Release 签名 secrets
+        run: |
+          cd android
+          # 从 GitHub Secrets 创建 keystore.properties
+          cat > keystore.properties << EOF
+          RELEASE_STORE_FILE=${{ secrets.RELEASE_STORE_FILE }}
+          RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}
+          EOF
+          
+          # 上传密钥文件（如果有）
+          if [ ! -z "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > app/${{ secrets.RELEASE_STORE_FILE }}
           fi
+
+      - name: 构建 Release APK
+        run: |
+          cd android
+          ./gradlew clean
+          ./gradlew assembleRelease \
+            --parallel \
+            --build-cache \
+            --configure-on-demand \
+            --no-daemon \
+            --console=verbose
+        timeout-minutes: 30
+
+      - name: 上传 Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apks-${{ needs.check-version.outputs.version }}
+          path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
