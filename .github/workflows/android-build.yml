@@ -1,4 +1,4 @@
-name: Beta Debug 构建
+name: Beta Debug
 
 on:
   push:
@@ -26,7 +26,20 @@ jobs:
       - name: Check version format
         id: version_check
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          # 添加JSON解析容错
+          if [ ! -f package.json ]; then
+            echo "❌ package.json not found"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          VERSION=$(node -p "try { require('./package.json').version } catch (e) { '' }")
+          if [ -z "$VERSION" ]; then
+            echo "❌ Failed to parse package.json"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
           echo "Current version: $VERSION"
           if [[ $VERSION =~ -beta\.[0-9]{1,2}$ ]]; then
             echo "✅ Version matches beta format: $VERSION"
@@ -45,9 +58,17 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo apt-get clean
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/*
+          df -h
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -62,7 +83,7 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Cache React Native and Gradle dependencies
+      - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -70,25 +91,41 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             android/.gradle
-          key: ${{ runner.os }}-rn-${{ hashFiles('package-lock.json', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+            android/app/build
+          key: ${{ runner.os }}-rn-${{ hashFiles('package-lock.json', 'android/gradle/wrapper/gradle-wrapper.properties', 'android/build.gradle') }}
           restore-keys: |
             ${{ runner.os }}-rn-
 
       - name: Install npm dependencies
-        run: npm ci
+        run: npm ci --prefer-offline
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build Debug APK (无签名)
+      - name: Diagnostic info
+        run: |
+          echo "Node version: $(node --version)"
+          echo "NPM version: $(npm --version)"
+          echo "Java version: $(java -version 2>&1)"
+          echo "Android SDK:"
+          ls $ANDROID_HOME || true
+
+      - name: Build Debug APK
         run: |
           cd android
-          ./gradlew assembleDebug --parallel --build-cache --configure-on-demand
+          ./gradlew clean
+          ./gradlew assembleDebug \
+            --parallel \
+            --build-cache \
+            --configure-on-demand \
+            --no-daemon \
+            --console=verbose
+        timeout-minutes: 20
 
       - name: List generated APKs
         run: |
           echo "📱 Generated APK files:"
-          ls -lh android/app/build/outputs/apk/debug/*.apk || true
+          find android/app/build/outputs -name "*.apk" -exec ls -la {} \; || true
 
       - name: Upload Debug APKs
         uses: actions/upload-artifact@v4
@@ -103,3 +140,4 @@ jobs:
           echo "📦 Version: ${{ needs.check-version.outputs.version }}"
           echo "🚀 Triggered by: ${{ github.event_name }}"
           echo "👤 Actor: ${{ github.actor }}"
+          echo "📊 Artifact: beta-debug-apks-${{ needs.check-version.outputs.version }}"
