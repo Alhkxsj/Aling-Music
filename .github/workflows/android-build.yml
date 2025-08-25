@@ -1,44 +1,105 @@
-name: Build Android APK
+name: Beta Debug 构建
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
+    branches: [dev]
+    paths: ['package.json']
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: '强制构建 Beta 版本'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
-  build:
+  check-version:
+    if: github.actor == 'maotoumao' || github.event_name == 'push'
     runs-on: ubuntu-latest
-
+    outputs:
+      should_build: ${{ steps.version_check.outputs.should_build }}
+      version: ${{ steps.version_check.outputs.version }}
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Check version format
+        id: version_check
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "Current version: $VERSION"
+          if [[ $VERSION =~ -beta\.[0-9]{1,2}$ ]]; then
+            echo "✅ Version matches beta format: $VERSION"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_build }}" == "true" ]]; then
+            echo "🔧 Force build triggered by workflow_dispatch"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Version does not match beta format or not forced: $VERSION"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-beta:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
+          java-version: '17'
           distribution: 'temurin'
-          java-version: 17
+          cache: 'gradle'
 
-      - name: Cache Gradle packages
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with: 
+          node-version: 20
+          cache: 'npm'
+
+      - name: Cache React Native and Gradle dependencies
         uses: actions/cache@v4
         with:
           path: |
+            node_modules
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+            android/.gradle
+          key: ${{ runner.os }}-rn-${{ hashFiles('package-lock.json', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            ${{ runner.os }}-rn-
+
+      - name: Install Dependencies
+        run: npm ci --prefer-offline --no-audit
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build Debug APK
+      - name: Build Debug APK (无签名)
         run: |
           cd android
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --parallel --build-cache --configure-on-demand
 
-      - name: Upload APK
+      - name: List generated APKs
+        run: |
+          echo "📱 Generated APK files:"
+          find app/build/outputs/apk/debug -name "*.apk" -exec ls -lh {} \;
+
+      - name: Upload Debug APKs
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: beta-debug-apks-${{ needs.check-version.outputs.version }}
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Build Summary
+        run: |
+          echo "🎉 Beta debug build completed successfully!"
+          echo "📦 Version: ${{ needs.check-version.outputs.version }}"
+          echo "🚀 Triggered by: ${{ github.event_name }}"
+          echo "👤 Actor: ${{ github.actor }}"
