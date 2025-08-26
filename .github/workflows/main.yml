@@ -76,16 +76,12 @@ jobs:
       - name: 修复签名配置问题
         run: |
           cd android/app
-          # 检查 debug.keystore 是否存在
           if [ -f "debug.keystore" ]; then
             echo "✅ debug.keystore 文件存在"
           else
             echo "⚠️  debug.keystore 文件不存在，将使用默认调试配置"
           fi
-          
-          # 修复签名配置 - 简化版本
           cp build.gradle build.gradle.backup
-          # 确保 release 配置有回退方案
           sed -i '/release {/,/}/ {
             /storeFile file(keystoreProperties/ {
               i\
@@ -172,18 +168,18 @@ jobs:
       - name: 设置 Release 签名 secrets
         run: |
           cd android
-          # 从 GitHub Secrets 创建 keystore.properties
           cat > keystore.properties << EOF
           RELEASE_STORE_FILE=${{ secrets.RELEASE_STORE_FILE }}
           RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}
           EOF
-          
-          # 上传密钥文件（如果有）
           if [ ! -z "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
             echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > app/${{ secrets.RELEASE_STORE_FILE }}
           fi
+
+      - name: 授予 gradlew 执行权限   # 👈 修复 release 权限问题
+        run: chmod +x android/gradlew
 
       - name: 构建 Release APK
         run: |
