@@ -5,11 +5,6 @@ apply plugin: "com.facebook.react"
 import com.android.build.OutputFile
 import groovy.json.JsonSlurper
 
-
-/**
- * This is the configuration block to customize your React Native Android app.
- * By default you don't need to apply any configuration, just uncomment the lines you need.
- */
 react {
     /* Folders */
     //   The root of your project, i.e. where "package.json" lives. Default is '../..'
@@ -87,11 +82,23 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'org.webkit:android-jsc:+'
 
-// !! Add lines
+// 添加密钥配置
 def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreFile = file('release.keystore') // 默认密钥文件名
+
+// 检查密钥属性文件是否存在
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+} else {
+    // 如果没有密钥属性文件，检查是否有默认的密钥文件
+    if (keystoreFile.exists()) {
+        // 使用默认的调试密钥作为回退
+        keystoreProperties.setProperty('RELEASE_STORE_FILE', 'debug.keystore')
+        keystoreProperties.setProperty('RELEASE_STORE_PASSWORD', 'android')
+        keystoreProperties.setProperty('RELEASE_KEY_ALIAS', 'androiddebugkey')
+        keystoreProperties.setProperty('RELEASE_KEY_PASSWORD', 'android')
+    }
 }
 
 static def getVersion() {
@@ -100,22 +107,8 @@ static def getVersion() {
     return packageJson["version"]
 }
 
-// static def versionStringToCode(String version) {
-//     def parts = version.split('\\.')
-//     def versionCode = 0
-//     def multiplier = 1000000
-//
-//     parts.each { part ->
-//         versionCode += part.toInteger() * multiplier
-//         multiplier /= 1000
-//     }
-//
-//     return versionCode.intValue()
-// }
-
 def appVersion = getVersion()
 def appVersionCode = 400011
-
 
 android {
     ndkVersion rootProject.ext.ndkVersion
@@ -131,6 +124,7 @@ android {
         versionCode appVersionCode
         versionName appVersion
     }
+    
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -138,32 +132,47 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
-        // !! Add lines
-         release {
-            storeFile file(keystoreProperties['RELEASE_STORE_FILE'])
-            storePassword keystoreProperties['RELEASE_STORE_PASSWORD']
-            keyAlias keystoreProperties['RELEASE_KEY_ALIAS']
-            keyPassword keystoreProperties['RELEASE_KEY_PASSWORD']
+        
+        release {
+            // 检查密钥文件是否存在
+            if (keystorePropertiesFile.exists() && file(keystoreProperties['RELEASE_STORE_FILE']).exists()) {
+                storeFile file(keystoreProperties['RELEASE_STORE_FILE'])
+                storePassword keystoreProperties['RELEASE_STORE_PASSWORD']
+                keyAlias keystoreProperties['RELEASE_KEY_ALIAS']
+                keyPassword keystoreProperties['RELEASE_KEY_PASSWORD']
+            } else if (file('release.keystore').exists()) {
+                // 如果有 release.keystore 文件但缺少属性文件
+                storeFile file('release.keystore')
+                storePassword System.getenv("RELEASE_STORE_PASSWORD") ?: ""
+                keyAlias System.getenv("RELEASE_KEY_ALIAS") ?: ""
+                keyPassword System.getenv("RELEASE_KEY_PASSWORD") ?: ""
+            } else {
+                // 回退到调试密钥
+                storeFile file('debug.keystore')
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+                println "警告: 使用调试密钥进行发布构建!"
+            }
         }
     }
+    
     splits {
-            abi {
-                reset()
-                enable true
-                universalApk true
-                include "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
-            }
+        abi {
+            reset()
+            enable true
+            universalApk true
+            include "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+        }
     }
-
-
 
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
+            // 注意! 在生产环境中，您需要生成自己的密钥库文件。
+            // 参见 https://reactnative.dev/docs/signed-apk-android。
             signingConfig signingConfigs.release
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
@@ -181,11 +190,8 @@ dependencies {
         implementation jscFlavor
     }
 
-    // !! Add lines
     implementation project(':react-native-fs')
     implementation 'com.facebook.fresco:animated-gif:2.5.0'
-    // https://mvnrepository.com/artifact/net.jthink/jaudiotagger
     implementation 'net.jthink:jaudiotagger:2.2.5'
     implementation 'androidx.core:core-splashscreen:1.0.0'
 }
-
