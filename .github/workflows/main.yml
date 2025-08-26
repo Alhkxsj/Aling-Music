@@ -1,70 +1,109 @@
-name: Beta 构建（调试版）
+name: MusicFree Debug 构建
 
 on:
   push:
-    branches: [dev]
+    branches: [main]
     paths: ['package.json']
   workflow_dispatch:
     inputs:
       force_build:
-        description: '强制构建 Beta 版本'
+        description: '强制构建'
         required: false
         default: 'false'
         type: boolean
 
 jobs:
   check-version:
-    if: github.actor == 'maotoumao' || github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.version_check.outputs.should_build }}
       version: ${{ steps.version_check.outputs.version }}
     steps:
-      - name: Checkout
+      - name: Checkout 代码
         uses: actions/checkout@v4
 
-      - name: Check version format
+      - name: 检查版本和构建条件
         id: version_check
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "Current version: $VERSION"
-          
-          # 检查版本是否符合 -beta.xx 格式
-          if [[ $VERSION =~ -beta\.[0-9]{1,2}$ ]]; then
-            echo "✅ Version matches beta format: $VERSION"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_build }}" == "true" ]]; then
-            echo "🔧 Force build triggered by workflow_dispatch"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Version does not match beta format or not forced: $VERSION"
+          if [ ! -f "package.json" ]; then
+            echo "❌ package.json 不存在"
             echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
+          
+          VERSION=$(node -e "console.log(require('./package.json').version || '')")
+          if [ -z "$VERSION" ]; then
+            echo "❌ 无法从 package.json 中获取版本号"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "当前版本: $VERSION"
+          echo "should_build=true" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-  build-beta-debug:
+  build-debug:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--max_old_space_size=4096"
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
-      - name: Checkout
+      - name: Checkout 代码
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: 设置 JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Setup Node.js
+      - name: 设置 Node.js
         uses: actions/setup-node@v4
-        with: 
+        with:
           node-version: 20
           cache: 'npm'
 
-      - name: Cache React Native dependencies
+      - name: 修改 Gradle 配置使用国内镜像
+        run: |
+          cd android
+          cp gradle/wrapper/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.properties.backup
+          sed -i 's|https\\://services.gradle.org/distributions|https://mirrors.cloud.tencent.com/gradle|' gradle/wrapper/gradle-wrapper.properties
+
+      - name: 修复签名配置问题
+        run: |
+          cd android/app
+          # 检查 debug.keystore 是否存在
+          if [ -f "debug.keystore" ]; then
+            echo "✅ debug.keystore 文件存在"
+          else
+            echo "⚠️  debug.keystore 文件不存在，将使用默认调试配置"
+          fi
+          
+          # 修复签名配置 - 简化版本
+          cp build.gradle build.gradle.backup
+          # 确保 release 配置有回退方案
+          sed -i '/release {/,/}/ {
+            /storeFile file(keystoreProperties/ {
+              i\
+            if (keystorePropertiesFile.exists()) {
+              :loop
+              n
+              /}/!b loop
+              i\
+            } else {\
+                storeFile file("debug.keystore")\
+                storePassword "android"\
+                keyAlias "androiddebugkey"\
+                keyPassword "android"\
+            }
+            }
+          }' build.gradle
+
+      - name: 缓存依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -76,32 +115,91 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rn-
 
-      - name: Install Dependencies
-        run: npm ci --prefer-offline --no-audit      
+      - name: 安装 npm 依赖
+        run: npm ci --prefer-offline
 
-      - name: Make gradlew executable
+      - name: 授予 gradlew 执行权限
         run: chmod +x android/gradlew
 
-      - name: Build Debug APK
-        run: | 
-          cd android
-          ./gradlew assembleDebug --parallel --build-cache --configure-on-demand
-
-      - name: List generated APKs
+      - name: 构建 Debug APK
         run: |
-          echo "📱 Generated Debug APK files:"
-          find android/app/build/outputs/apk/debug -name "*.apk" -exec ls -lh {} \;
+          cd android
+          ./gradlew clean
+          ./gradlew assembleDebug \
+            --parallel \
+            --build-cache \
+            --configure-on-demand \
+            --no-daemon \
+            --console=verbose
+        timeout-minutes: 25
 
-      - name: Upload Debug APKs
+      - name: 列出生成的 APK
+        run: |
+          echo "📱 生成的 APK 文件:"
+          find android/app/build/outputs -name "*.apk" -exec ls -la {} \; || true
+
+      - name: 上传 Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: debug-apks-${{ needs.check-version.outputs.version }}
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
-      - name: Build Summary
+      - name: 构建总结
         run: |
-          echo "🎉 Debug build completed successfully!"
-          echo "📦 Version: ${{ needs.check-version.outputs.version }}"
-          echo "🚀 Triggered by: ${{ github.event_name }}"
-          echo "👤 Actor: ${{ github.actor }}"
+          echo "🎉 Debug 构建成功完成!"
+          echo "📦 版本: ${{ needs.check-version.outputs.version }}"
+          echo "🚀 触发方式: ${{ github.event_name }}"
+          echo "👤 操作者: ${{ github.actor }}"
+
+  build-release:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: "--max_old_space_size=4096"
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: 设置 Release 签名 secrets
+        run: |
+          cd android
+          # 从 GitHub Secrets 创建 keystore.properties
+          cat > keystore.properties << EOF
+          RELEASE_STORE_FILE=${{ secrets.RELEASE_STORE_FILE }}
+          RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}
+          EOF
+          
+          # 上传密钥文件（如果有）
+          if [ ! -z "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > app/${{ secrets.RELEASE_STORE_FILE }}
+          fi
+
+      - name: 构建 Release APK
+        run: |
+          cd android
+          ./gradlew clean
+          ./gradlew assembleRelease \
+            --parallel \
+            --build-cache \
+            --configure-on-demand \
+            --no-daemon \
+            --console=verbose
+        timeout-minutes: 30
+
+      - name: 上传 Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apks-${{ needs.check-version.outputs.version }}
+          path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
